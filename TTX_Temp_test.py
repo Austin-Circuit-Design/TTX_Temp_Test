@@ -8,6 +8,7 @@ ics_4899a = rm.open_resource("GPIB0::4::INSTR")
 # Configuration variables
 gpib_timeout = 5000  # 5 second timeout
 retry_count = 3
+cycle_count = 0  # Track total cycles completed
 
 def configure_gpib():
     """Configure GPIB settings"""
@@ -162,11 +163,13 @@ def wait_for_temp_stabilization(target_temp, tolerance=2.5, stabilization_time=6
 
 def cycle_temperatures():
     """Main function to cycle between low and high temperatures"""
+    global cycle_count
     low_temp = 32
     high_temp = 140
     
     print("Starting temperature cycling between 32°F and 140°F")
     print("Press Ctrl+C to stop the cycling")
+    print(f"Current cycle count: {cycle_count}")
     
     try:
         # Turn chamber on with retry logic
@@ -176,7 +179,8 @@ def cycle_temperatures():
         time.sleep(2)
         
         while True:
-            for temp in [low_temp, high_temp]:
+            cycle_temps = [low_temp, high_temp]
+            for i, temp in enumerate(cycle_temps):
                 print(f"\n--- Setting Temperature to: {temp}°F ---")
                 
                 # Write temperature with retry logic
@@ -191,16 +195,25 @@ def cycle_temperatures():
                 
                 print(f"Temperature cycle at {temp}°F completed. Moving to next temperature...")
                 
+                # Increment cycle counter after completing high temperature (end of full cycle)
+                if i == 1:  # High temperature is second in the cycle
+                    cycle_count += 1
+                    print(f"=== COMPLETED CYCLE #{cycle_count} ===")
+                
     except KeyboardInterrupt:
-        print("\nUser stop signal received. Stopping temperature cycling...")
+        print(f"\nUser stop signal received. Stopping temperature cycling...")
+        print(f"Total cycles completed: {cycle_count}")
     except Exception as e:
         print(f"An error occurred: {e}")
+        print(f"Total cycles completed: {cycle_count}")
     finally:
         # Turn chamber off with retry logic
         if gpib_wrt_with_retry("W 2000, 0"):
             print("Chamber turned off. Exiting...")
+            print(f"Final cycle count: {cycle_count}")
         else:
             print("Warning: Could not confirm chamber was turned off.")
+            print(f"Final cycle count: {cycle_count}")
         rm.close()
 
 # Initialize and start cycling

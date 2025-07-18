@@ -23,6 +23,7 @@ class TempCycleGUI:
         self.gpib_timeout = 5000  # 5 second timeout
         self.retry_count = 3
         self.temp_read_timeout = 10000  # Longer timeout for temperature reads
+        self.cycle_count = 0  # Track total cycles completed
         
         self.setup_gui()
         self.connect_to_device()
@@ -85,6 +86,10 @@ class TempCycleGUI:
         self.timer_label = ttk.Label(status_frame, text="--:--")
         self.timer_label.grid(row=3, column=1, sticky=tk.W, padx=(5, 0))
         
+        ttk.Label(status_frame, text="Cycle Count:").grid(row=4, column=0, sticky=tk.W)
+        self.cycle_count_label = ttk.Label(status_frame, text="0")
+        self.cycle_count_label.grid(row=4, column=1, sticky=tk.W, padx=(5, 0))
+        
         # Control buttons
         button_frame = ttk.Frame(main_frame)
         button_frame.grid(row=4, column=0, columnspan=3, pady=(10, 0))
@@ -95,7 +100,11 @@ class TempCycleGUI:
         
         self.stop_button = ttk.Button(button_frame, text="Stop Cycling", 
                                      command=self.stop_cycling_func, state="disabled")
-        self.stop_button.grid(row=0, column=1)
+        self.stop_button.grid(row=0, column=1, padx=(0, 10))
+        
+        self.reset_counter_button = ttk.Button(button_frame, text="Reset Counter", 
+                                              command=self.reset_cycle_counter)
+        self.reset_counter_button.grid(row=0, column=2)
         
         # Log display
         log_frame = ttk.LabelFrame(main_frame, text="Activity Log", padding="10")
@@ -447,6 +456,18 @@ class TempCycleGUI:
                 
         return temp_stabilized
         
+    def reset_cycle_counter(self):
+        """Reset the cycle counter to zero"""
+        self.cycle_count = 0
+        self.cycle_count_label.config(text="0")
+        self.log_message("Cycle counter reset to 0")
+        
+    def increment_cycle_counter(self):
+        """Increment the cycle counter and update display"""
+        self.cycle_count += 1
+        self.cycle_count_label.config(text=str(self.cycle_count))
+        self.log_message(f"Completed cycle #{self.cycle_count}")
+        
     def cycling_worker(self):
         try:
             low_temp = float(self.low_temp_var.get())
@@ -461,7 +482,8 @@ class TempCycleGUI:
             time.sleep(2)  # Longer delay after turning on
             
             while not self.stop_cycling:
-                for temp in [low_temp, high_temp]:
+                cycle_temps = [low_temp, high_temp]
+                for i, temp in enumerate(cycle_temps):
                     if self.stop_cycling:
                         break
                         
@@ -486,6 +508,10 @@ class TempCycleGUI:
                         
                     if not self.stop_cycling:
                         self.log_message(f"Temperature cycle at {temp}°F completed. Moving to next temperature...")
+                        
+                        # Increment cycle counter after completing high temperature (end of full cycle)
+                        if i == 1:  # High temperature is second in the cycle
+                            self.increment_cycle_counter()
                         
         except Exception as e:
             self.log_message(f"An error occurred: {e}")
