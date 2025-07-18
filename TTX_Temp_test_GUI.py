@@ -18,6 +18,10 @@ class TempCycleGUI:
         self.ics_4899a = None
         self.decimal = 0
         self.is_connected = False
+        self.connection_attempts = 0
+        self.max_connection_attempts = 3
+        self.gpib_timeout = 5000  # 5 second timeout
+        self.retry_count = 3
         
         self.setup_gui()
         self.connect_to_device()
@@ -49,6 +53,17 @@ class TempCycleGUI:
         self.high_temp_var = tk.StringVar(value="140")
         ttk.Entry(temp_frame, textvariable=self.high_temp_var, width=10).grid(row=1, column=1, padx=(5, 0))
         
+        # Timeout settings frame
+        timeout_frame = ttk.LabelFrame(main_frame, text="Communication Settings", padding="10")
+        timeout_frame.grid(row=2, column=2, sticky=(tk.W, tk.E), pady=(0, 10), padx=(10, 0))
+        
+        ttk.Label(timeout_frame, text="GPIB Timeout (ms):").grid(row=0, column=0, sticky=tk.W)
+        self.timeout_var = tk.StringVar(value="5000")
+        timeout_entry = ttk.Entry(timeout_frame, textvariable=self.timeout_var, width=8)
+        timeout_entry.grid(row=0, column=1, padx=(5, 0))
+        
+        ttk.Button(timeout_frame, text="Apply", command=self.update_timeout).grid(row=1, column=0, columnspan=2, pady=(5, 0))
+        
         # Current status frame
         status_frame = ttk.LabelFrame(main_frame, text="Current Status", padding="10")
         status_frame.grid(row=3, column=0, columnspan=3, sticky=(tk.W, tk.E), pady=(0, 10))
@@ -64,6 +79,10 @@ class TempCycleGUI:
         ttk.Label(status_frame, text="Cycling Status:").grid(row=2, column=0, sticky=tk.W)
         self.cycling_status_label = ttk.Label(status_frame, text="Stopped")
         self.cycling_status_label.grid(row=2, column=1, sticky=tk.W, padx=(5, 0))
+        
+        ttk.Label(status_frame, text="Hold Timer:").grid(row=3, column=0, sticky=tk.W)
+        self.timer_label = ttk.Label(status_frame, text="--:--")
+        self.timer_label.grid(row=3, column=1, sticky=tk.W, padx=(5, 0))
         
         # Control buttons
         button_frame = ttk.Frame(main_frame)
@@ -99,22 +118,117 @@ class TempCycleGUI:
         self.log_text.see(tk.END)
         print(message)  # Also print to console
         
+    def update_timeout(self):
+        """Update GPIB timeout setting"""
+        try:
+            new_timeout = int(self.timeout_var.get())
+            if new_timeout < 1000:
+                new_timeout = 1000  # Minimum 1 second
+            self.gpib_timeout = new_timeout
+            if self.ics_4899a:
+                self.ics_4899a.timeout = new_timeout
+            self.log_message(f"GPIB timeout updated to {new_timeout}ms")
+        except ValueError:
+            self.log_message("Invalid timeout value. Using default 5000ms")
+            self.timeout_var.set("5000")
+            self.gpib_timeout = 5000
+        
+    def format_time(self, seconds):
+        """Format seconds into minutes:seconds format"""
+        minutes = int(seconds // 60)
+        seconds = int(seconds % 60)
+        return f"{minutes:02d}:{seconds:02d}"
+
+    def update_timer_display(self, elapsed_time, total_time):
+        """Update the timer display in the GUI"""
+        remaining_time = total_time - elapsed_time
+        timer_text = f"{self.format_time(elapsed_time)}/{self.format_time(total_time)}"
+        self.timer_label.config(text=timer_text)
+
+    def reconnect_device(self):
+        """Attempt to reconnect to the GPIB device"""
+        self.log_message("Attempting to reconnect to GPIB device...")
+        try:
+            # Close existing connections
+            if self.ics_4899a:
+                try:
+                    self.ics_4899a.close()
+                except:
+                    pass
+            
+            if self.rm:
+                try:
+                    self.rm.close()
+                except:
+                    pass
+            
+            # Wait before reconnecting
+            time.sleep(2)
+            
+            # Reinitialize connection
+            self.rm = pyvisa.ResourceManager()
+            self.ics_4899a = self.rm.open_resource("GPIB0::4::INSTR")
+            
+            # Configure timeout and other settings
+            self.ics_4899a.timeout = self.gpib_timeout
+            self.ics_4899a.read_termination = '\n'
+            self.ics_4899a.write_termination = '\n'
+            
+            # Test connection with retries
+            for attempt in range(3):
+                try:
+                    test_response = self.ics_4899a.query("*IDN?")
+                    if test_response and test_response.strip():
+                        # Read decimal configuration
+                        decimal_response = self.gpib_rd_with_retry("R? 606, 1")
+                        if decimal_response:
+                            self.decimal = int(decimal_response)
+                            self.is_connected = True
+                            self.connection_label.config(text="Status: Reconnected", foreground="green")
+                            self.log_message("Successfully reconnected to GPIB device")
+                            return True
+                    time.sleep(1)  # Wait between attempts
+                except:
+                    continue
+            
+            raise Exception("Failed to establish stable connection after retries")
+                
+        except Exception as e:
+            self.is_connected = False
+            self.connection_label.config(text="Status: Connection Failed", foreground="red")
+            self.log_message(f"Reconnection failed: {e}")
+            return False
+        
     def connect_to_device(self):
         try:
             self.rm = pyvisa.ResourceManager()
             self.ics_4899a = self.rm.open_resource("GPIB0::4::INSTR")
             
-            # Read decimal point configuration
-            self.decimal = int(self.gpib_rd("R? 606, 1"))
+            # Configure GPIB settings
+            self.ics_4899a.timeout = self.gpib_timeout
+            self.ics_4899a.read_termination = '\n'
+            self.ics_4899a.write_termination = '\n'
+            
+            # Read decimal point configuration with validation
+            decimal_response = self.gpib_rd_with_retry("R? 606, 1")
+            if decimal_response and decimal_response.strip():
+                self.decimal = int(decimal_response)
+            else:
+                raise Exception("Could not read decimal configuration")
             
             # Test connection
-            device_id = self.gpib_rd("*IDN?")
-            current_temp = self.read_temp(100)
+            device_id = self.gpib_rd_with_retry("*IDN?")
+            if not device_id or not device_id.strip():
+                raise Exception("Could not read device ID")
+                
+            current_temp = self.read_temp_with_retry(100)
+            if current_temp is None:
+                raise Exception("Could not read temperature")
             
             self.is_connected = True
             self.connection_label.config(text="Status: Connected", foreground="green")
             self.start_button.config(state="normal")
-            self.log_message(f"Connected to: {device_id}")
+            self.log_message(f"Connected to: {device_id.strip()}")
             self.log_message(f"Current chamber temperature: {current_temp}°F")
             
             # Start temperature monitoring
@@ -124,59 +238,165 @@ class TempCycleGUI:
             self.log_message(f"Connection failed: {e}")
             self.connection_label.config(text="Status: Connection Failed", foreground="red")
     
+    def gpib_rd_with_retry(self, cmd, retries=None):
+        """GPIB read with retry logic"""
+        if retries is None:
+            retries = self.retry_count
+            
+        for attempt in range(retries):
+            try:
+                time.sleep(0.2)  # Shorter delay between retries
+                ret = self.ics_4899a.query(cmd)
+                if ret is not None and ret.strip() != "":
+                    return ret.strip()
+                else:
+                    if attempt < retries - 1:
+                        self.log_message(f"Empty response for '{cmd}', retry {attempt + 1}/{retries}")
+                        time.sleep(0.5)
+                        continue
+            except (pyvisa.errors.VisaIOError, pyvisa.errors.InvalidSession) as e:
+                if attempt < retries - 1:
+                    self.log_message(f"GPIB error for '{cmd}', retry {attempt + 1}/{retries}: {e}")
+                    time.sleep(1)
+                    continue
+                else:
+                    self.log_message(f"GPIB Query failed after {retries} attempts: {e}")
+                    self.is_connected = False
+                    
+        return ""
+
+    def gpib_wrt_with_retry(self, cmd, retries=None):
+        """GPIB write with retry logic"""
+        if retries is None:
+            retries = self.retry_count
+            
+        for attempt in range(retries):
+            try:
+                time.sleep(0.2)
+                self.ics_4899a.write(cmd)
+                return True
+            except (pyvisa.errors.VisaIOError, pyvisa.errors.InvalidSession) as e:
+                if attempt < retries - 1:
+                    self.log_message(f"GPIB write error for '{cmd}', retry {attempt + 1}/{retries}: {e}")
+                    time.sleep(1)
+                    continue
+                else:
+                    self.log_message(f"GPIB Write failed after {retries} attempts: {e}")
+                    self.is_connected = False
+                    
+        return False
+
     def gpib_rd(self, cmd):
-        time.sleep(0.5)   
-        try:
-            ret = self.ics_4899a.query(cmd)
-        except pyvisa.errors.VisaIOError as e: 
-            self.log_message(f"Query Error: {e.args}")
-            ret = ""
-        return ret
+        return self.gpib_rd_with_retry(cmd, 1)  # Single attempt for backward compatibility
 
     def gpib_wrt(self, cmd):
-        time.sleep(0.5)  
-        try:
-            self.ics_4899a.write(cmd)
-        except pyvisa.errors.VisaIOError as e: 
-            self.log_message(f"Write Error: {e.args}")
+        return self.gpib_wrt_with_retry(cmd, 1)  # Single attempt for backward compatibility
+
+    def read_temp_with_retry(self, addr):
+        """Read temperature with retry logic"""
+        for attempt in range(self.retry_count):
+            try:
+                response = self.gpib_rd_with_retry("R? " + str(addr) + ", 1")
+                if not response or response == "":
+                    if attempt < self.retry_count - 1:
+                        time.sleep(0.5)
+                        continue
+                    return None
+                temp_raw = int(response)
+                return float(temp_raw / (10 ** self.decimal))
+            except (ValueError, TypeError) as e:
+                if attempt < self.retry_count - 1:
+                    self.log_message(f"Temperature conversion error, retry {attempt + 1}: {e}")
+                    time.sleep(0.5)
+                    continue
+                else:
+                    self.log_message(f"Temperature conversion error after {self.retry_count} attempts: {e}")
+                    return None
+            except Exception as e:
+                if attempt < self.retry_count - 1:
+                    self.log_message(f"Temperature read error, retry {attempt + 1}: {e}")
+                    time.sleep(0.5)
+                    continue
+                else:
+                    self.log_message(f"Temperature read error after {self.retry_count} attempts: {e}")
+                    return None
+        return None
 
     def read_temp(self, addr):
-        return float(int(self.gpib_rd("R? " + str(addr) + ", 1")) / (10 ** self.decimal))
+        return self.read_temp_with_retry(addr)
 
     def write_temp(self, addr, value):
-        set_cmd = "W " + str(addr) + ", " + str(value * (10 ** self.decimal))
-        self.gpib_wrt(set_cmd)
+        set_cmd = "W " + str(addr) + ", " + str(int(value * (10 ** self.decimal)))
+        return self.gpib_wrt_with_retry(set_cmd)
         
     def monitor_temperature(self):
         if self.is_connected:
-            try:
-                current_temp = self.read_temp(100)
+            current_temp = self.read_temp(100)
+            if current_temp is not None:
                 self.current_temp_label.config(text=f"{current_temp}°F")
-            except Exception as e:
-                self.log_message(f"Temperature read error: {e}")
+            else:
+                self.current_temp_label.config(text="--°F")
+                # Try to reconnect if we lost connection
+                if not self.is_connected:
+                    self.log_message("Lost connection during monitoring. Attempting reconnection...")
+                    self.reconnect_device()
                 
         # Schedule next update
-        self.root.after(2000, self.monitor_temperature)  # Update every 2 seconds
+        self.root.after(3000, self.monitor_temperature)  # Increased to 3 seconds to reduce load
         
     def wait_for_temp_stabilization(self, target_temp, tolerance=2.5, stabilization_time=600):
         temp_stabilized = False
         stabilization_start = None
+        consecutive_failures = 0
+        max_failures = 3  # Reduced from 5 to trigger reconnection sooner
+        last_gui_update = time.time()
         
         while not temp_stabilized and not self.stop_cycling:
             current_temp = self.read_temp(100)
+            
+            if current_temp is None:
+                consecutive_failures += 1
+                self.log_message(f"Temperature read failure {consecutive_failures}/{max_failures}")
+                
+                if consecutive_failures >= max_failures:
+                    self.log_message("Too many consecutive temperature read failures. Attempting reconnection...")
+                    if self.reconnect_device():
+                        consecutive_failures = 0
+                        time.sleep(2)  # Wait after reconnection
+                        continue
+                    else:
+                        self.log_message("Reconnection failed. Stopping temperature cycling.")
+                        return False
+                time.sleep(2)  # Longer wait between failed attempts
+                continue
+            else:
+                consecutive_failures = 0
+                
             if abs(current_temp - target_temp) <= tolerance:
                 if stabilization_start is None:
                     stabilization_start = time.time()
                     self.log_message(f"Temperature within range at {current_temp}°F. Starting stabilization timer.")
-                elif time.time() - stabilization_start > stabilization_time:
-                    temp_stabilized = True
-                    self.log_message(f"Temperature stabilized at {current_temp}°F for {stabilization_time/60:.1f} minutes.")
+                    self.timer_label.config(text="00:00/10:00")
+                else:
+                    elapsed_time = time.time() - stabilization_start
+                    
+                    # Update GUI timer every 5 seconds
+                    if time.time() - last_gui_update >= 5:
+                        self.update_timer_display(elapsed_time, stabilization_time)
+                        last_gui_update = time.time()
+                    
+                    if elapsed_time >= stabilization_time:
+                        temp_stabilized = True
+                        self.log_message(f"Temperature stabilized at {current_temp}°F for {stabilization_time/60:.1f} minutes. ✓")
+                        self.timer_label.config(text="Complete")
             else:
                 stabilization_start = None
+                self.timer_label.config(text="--:--")
                 self.log_message(f"Waiting for temperature to stabilize... Current: {current_temp}°F, Target: {target_temp}°F")
+                last_gui_update = time.time()
             
-            # Check every second but allow for stop signal
-            for _ in range(10):  # Check stop signal more frequently
+            # Check every 2 seconds but allow for stop signal
+            for _ in range(20):  # Check stop signal more frequently
                 if self.stop_cycling:
                     return False
                 time.sleep(0.1)
@@ -190,9 +410,11 @@ class TempCycleGUI:
             
             self.log_message(f"Starting temperature cycling between {low_temp}°F and {high_temp}°F")
             
-            # Turn chamber on
-            self.gpib_wrt("W 2000, 1")
-            time.sleep(1)
+            # Turn chamber on with error checking and retries
+            if not self.gpib_wrt_with_retry("W 2000, 1"):
+                self.log_message("Failed to turn chamber on. Stopping...")
+                return
+            time.sleep(2)  # Longer delay after turning on
             
             while not self.stop_cycling:
                 for temp in [low_temp, high_temp]:
@@ -201,11 +423,22 @@ class TempCycleGUI:
                         
                     self.log_message(f"Setting Temperature to: {temp}°F")
                     self.target_temp_label.config(text=f"{temp}°F")
-                    self.write_temp(300, temp)
+                    self.timer_label.config(text="--:--")
+                    
+                    # Write temperature with error checking and retries
+                    if not self.write_temp(300, temp):
+                        self.log_message("Failed to set temperature. Attempting reconnection...")
+                        if not self.reconnect_device():
+                            self.log_message("Cannot reconnect. Stopping cycling.")
+                            break
+                        # Retry temperature setting after reconnection
+                        if not self.write_temp(300, temp):
+                            self.log_message("Failed to set temperature after reconnection. Stopping cycling.")
+                            break
                     
                     # Wait for temperature stabilization
                     if not self.wait_for_temp_stabilization(temp):
-                        break  # Stop cycling was requested
+                        break  # Stop cycling was requested or error occurred
                         
                     if not self.stop_cycling:
                         self.log_message(f"Temperature cycle at {temp}°F completed. Moving to next temperature...")
@@ -213,22 +446,27 @@ class TempCycleGUI:
         except Exception as e:
             self.log_message(f"An error occurred: {e}")
         finally:
-            # Turn chamber off
+            # Turn chamber off with retries
             if self.is_connected:
-                self.gpib_wrt("W 2000, 0")
-                self.log_message("Chamber turned off.")
+                if self.gpib_wrt_with_retry("W 2000, 0"):
+                    self.log_message("Chamber turned off.")
+                else:
+                    self.log_message("Warning: Could not confirm chamber was turned off.")
             
             # Reset UI state
             self.cycling_status_label.config(text="Stopped")
             self.target_temp_label.config(text="--°F")
+            self.timer_label.config(text="--:--")
             self.start_button.config(state="normal")
             self.stop_button.config(state="disabled")
             self.stop_cycling = False
             
     def start_cycling(self):
         if not self.is_connected:
-            self.log_message("Error: Not connected to device")
-            return
+            self.log_message("Error: Not connected to device. Attempting reconnection...")
+            if not self.reconnect_device():
+                self.log_message("Cannot start cycling - no device connection")
+                return
             
         self.stop_cycling = False
         self.cycling_status_label.config(text="Running")
@@ -256,8 +494,17 @@ class TempCycleGUI:
             except:
                 pass
                 
+        if self.ics_4899a:
+            try:
+                self.ics_4899a.close()
+            except:
+                pass
+                
         if self.rm:
-            self.rm.close()
+            try:
+                self.rm.close()
+            except:
+                pass
             
         self.root.destroy()
 
