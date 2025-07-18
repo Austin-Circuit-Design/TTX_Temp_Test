@@ -22,6 +22,7 @@ class TempCycleGUI:
         self.max_connection_attempts = 3
         self.gpib_timeout = 5000  # 5 second timeout
         self.retry_count = 3
+        self.temp_read_timeout = 10000  # Longer timeout for temperature reads
         
         self.setup_gui()
         self.connect_to_device()
@@ -125,13 +126,15 @@ class TempCycleGUI:
             if new_timeout < 1000:
                 new_timeout = 1000  # Minimum 1 second
             self.gpib_timeout = new_timeout
+            self.temp_read_timeout = max(new_timeout * 2, 10000)  # Double timeout for temp reads
             if self.ics_4899a:
                 self.ics_4899a.timeout = new_timeout
-            self.log_message(f"GPIB timeout updated to {new_timeout}ms")
+            self.log_message(f"GPIB timeout updated to {new_timeout}ms (temp reads: {self.temp_read_timeout}ms)")
         except ValueError:
             self.log_message("Invalid timeout value. Using default 5000ms")
             self.timeout_var.set("5000")
             self.gpib_timeout = 5000
+            self.temp_read_timeout = 10000
         
     def format_time(self, seconds):
         """Format seconds into minutes:seconds format"""
@@ -238,30 +241,57 @@ class TempCycleGUI:
             self.log_message(f"Connection failed: {e}")
             self.connection_label.config(text="Status: Connection Failed", foreground="red")
     
-    def gpib_rd_with_retry(self, cmd, retries=None):
+    def gpib_rd_with_retry(self, cmd, retries=None, extended_timeout=False):
         """GPIB read with retry logic"""
         if retries is None:
             retries = self.retry_count
             
-        for attempt in range(retries):
-            try:
-                time.sleep(0.2)  # Shorter delay between retries
-                ret = self.ics_4899a.query(cmd)
-                if ret is not None and ret.strip() != "":
-                    return ret.strip()
-                else:
+        # Save original timeout
+        original_timeout = self.ics_4899a.timeout if self.ics_4899a else self.gpib_timeout
+        
+        try:
+            # Use extended timeout for temperature reads during stabilization
+            if extended_timeout and self.ics_4899a:
+                self.ics_4899a.timeout = self.temp_read_timeout
+            
+            for attempt in range(retries):
+                try:
+                    time.sleep(0.3)  # Slightly longer delay
+                    ret = self.ics_4899a.query(cmd)
+                    if ret is not None and ret.strip() != "":
+                        return ret.strip()
+                    else:
+                        if attempt < retries - 1:
+                            self.log_message(f"Empty response for '{cmd}', retry {attempt + 1}/{retries}")
+                            time.sleep(1)  # Longer wait between retries
+                            continue
+                except (pyvisa.errors.VisaIOError, pyvisa.errors.InvalidSession) as e:
+                    error_msg = str(e)
+                    if "TMO" in error_msg or "timeout" in error_msg.lower():
+                        self.log_message(f"Timeout for '{cmd}', retry {attempt + 1}/{retries}")
+                    elif "I/O" in error_msg:
+                        self.log_message(f"I/O error for '{cmd}', retry {attempt + 1}/{retries}")
+                        # For I/O errors, wait longer and try to reset connection
+                        if attempt == 1:  # On second attempt, try to reset
+                            time.sleep(2)
+                            try:
+                                self.ics_4899a.clear()  # Clear any pending operations
+                            except:
+                                pass
+                    else:
+                        self.log_message(f"GPIB error for '{cmd}', retry {attempt + 1}/{retries}: {e}")
+                    
                     if attempt < retries - 1:
-                        self.log_message(f"Empty response for '{cmd}', retry {attempt + 1}/{retries}")
-                        time.sleep(0.5)
+                        time.sleep(2)  # Longer wait between error retries
                         continue
-            except (pyvisa.errors.VisaIOError, pyvisa.errors.InvalidSession) as e:
-                if attempt < retries - 1:
-                    self.log_message(f"GPIB error for '{cmd}', retry {attempt + 1}/{retries}: {e}")
-                    time.sleep(1)
-                    continue
-                else:
-                    self.log_message(f"GPIB Query failed after {retries} attempts: {e}")
-                    self.is_connected = False
+                    else:
+                        self.log_message(f"GPIB Query failed after {retries} attempts: {e}")
+                        self.is_connected = False
+                        
+        finally:
+            # Restore original timeout
+            if self.ics_4899a:
+                self.ics_4899a.timeout = original_timeout
                     
         return ""
 
@@ -272,13 +302,21 @@ class TempCycleGUI:
             
         for attempt in range(retries):
             try:
-                time.sleep(0.2)
+                time.sleep(0.3)
                 self.ics_4899a.write(cmd)
                 return True
             except (pyvisa.errors.VisaIOError, pyvisa.errors.InvalidSession) as e:
+                error_msg = str(e)
+                if "I/O" in error_msg and attempt == 1:  # On second attempt for I/O errors
+                    try:
+                        self.ics_4899a.clear()  # Clear any pending operations
+                        time.sleep(1)
+                    except:
+                        pass
+                        
                 if attempt < retries - 1:
                     self.log_message(f"GPIB write error for '{cmd}', retry {attempt + 1}/{retries}: {e}")
-                    time.sleep(1)
+                    time.sleep(2)
                     continue
                 else:
                     self.log_message(f"GPIB Write failed after {retries} attempts: {e}")
@@ -292,14 +330,15 @@ class TempCycleGUI:
     def gpib_wrt(self, cmd):
         return self.gpib_wrt_with_retry(cmd, 1)  # Single attempt for backward compatibility
 
-    def read_temp_with_retry(self, addr):
+    def read_temp_with_retry(self, addr, extended_timeout=False):
         """Read temperature with retry logic"""
         for attempt in range(self.retry_count):
             try:
-                response = self.gpib_rd_with_retry("R? " + str(addr) + ", 1")
+                response = self.gpib_rd_with_retry("R? " + str(addr) + ", 1", extended_timeout=extended_timeout)
                 if not response or response == "":
                     if attempt < self.retry_count - 1:
-                        time.sleep(0.5)
+                        self.log_message(f"Empty temperature response, retry {attempt + 1}/{self.retry_count}")
+                        time.sleep(1)
                         continue
                     return None
                 temp_raw = int(response)
@@ -307,7 +346,7 @@ class TempCycleGUI:
             except (ValueError, TypeError) as e:
                 if attempt < self.retry_count - 1:
                     self.log_message(f"Temperature conversion error, retry {attempt + 1}: {e}")
-                    time.sleep(0.5)
+                    time.sleep(1)
                     continue
                 else:
                     self.log_message(f"Temperature conversion error after {self.retry_count} attempts: {e}")
@@ -315,15 +354,15 @@ class TempCycleGUI:
             except Exception as e:
                 if attempt < self.retry_count - 1:
                     self.log_message(f"Temperature read error, retry {attempt + 1}: {e}")
-                    time.sleep(0.5)
+                    time.sleep(1)
                     continue
                 else:
                     self.log_message(f"Temperature read error after {self.retry_count} attempts: {e}")
                     return None
         return None
 
-    def read_temp(self, addr):
-        return self.read_temp_with_retry(addr)
+    def read_temp(self, addr, extended_timeout=False):
+        return self.read_temp_with_retry(addr, extended_timeout)
 
     def write_temp(self, addr, value):
         set_cmd = "W " + str(addr) + ", " + str(int(value * (10 ** self.decimal)))
@@ -348,11 +387,13 @@ class TempCycleGUI:
         temp_stabilized = False
         stabilization_start = None
         consecutive_failures = 0
-        max_failures = 3  # Reduced from 5 to trigger reconnection sooner
+        max_failures = 5  # Increased tolerance for failures during stabilization
         last_gui_update = time.time()
+        temp_read_interval = 3  # Read temperature every 3 seconds during stabilization
         
         while not temp_stabilized and not self.stop_cycling:
-            current_temp = self.read_temp(100)
+            # Use extended timeout for temperature reads during stabilization
+            current_temp = self.read_temp(100, extended_timeout=True)
             
             if current_temp is None:
                 consecutive_failures += 1
@@ -362,12 +403,14 @@ class TempCycleGUI:
                     self.log_message("Too many consecutive temperature read failures. Attempting reconnection...")
                     if self.reconnect_device():
                         consecutive_failures = 0
-                        time.sleep(2)  # Wait after reconnection
+                        time.sleep(3)  # Wait after reconnection
                         continue
                     else:
                         self.log_message("Reconnection failed. Stopping temperature cycling.")
                         return False
-                time.sleep(2)  # Longer wait between failed attempts
+                        
+                # Wait longer between failed attempts during stabilization
+                time.sleep(5)
                 continue
             else:
                 consecutive_failures = 0
@@ -380,9 +423,10 @@ class TempCycleGUI:
                 else:
                     elapsed_time = time.time() - stabilization_start
                     
-                    # Update GUI timer every 5 seconds
-                    if time.time() - last_gui_update >= 5:
+                    # Update GUI timer every 10 seconds during stabilization
+                    if time.time() - last_gui_update >= 10:
                         self.update_timer_display(elapsed_time, stabilization_time)
+                        self.log_message(f"Stabilizing at {current_temp}°F - {self.format_time(elapsed_time)}/{self.format_time(stabilization_time)}")
                         last_gui_update = time.time()
                     
                     if elapsed_time >= stabilization_time:
@@ -395,8 +439,8 @@ class TempCycleGUI:
                 self.log_message(f"Waiting for temperature to stabilize... Current: {current_temp}°F, Target: {target_temp}°F")
                 last_gui_update = time.time()
             
-            # Check every 2 seconds but allow for stop signal
-            for _ in range(20):  # Check stop signal more frequently
+            # Check for stop signal more frequently but read temp less frequently
+            for _ in range(temp_read_interval * 10):  # Check stop signal every 0.1 seconds
                 if self.stop_cycling:
                     return False
                 time.sleep(0.1)
