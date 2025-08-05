@@ -9,7 +9,7 @@ class TempCycleGUI:
     def __init__(self, root):
         self.root = root
         self.root.title("Temperature Cycling Control")
-        self.root.geometry("600x500")
+        self.root.geometry("600x600")
         
         # Initialize variables
         self.cycling_thread = None
@@ -24,6 +24,13 @@ class TempCycleGUI:
         self.retry_count = 3
         self.temp_read_timeout = 10000  # Longer timeout for temperature reads
         self.cycle_count = 0  # Track total cycles completed
+        
+        # Transition timing variables
+        self.transition_start_time = None
+        self.transition_start_temp = None
+        self.heating_times = []  # List to store heating transition times
+        self.cooling_times = []  # List to store cooling transition times
+        self.current_transition_type = None  # 'heating' or 'cooling'
         
         self.setup_gui()
         self.connect_to_device()
@@ -90,9 +97,37 @@ class TempCycleGUI:
         self.cycle_count_label = ttk.Label(status_frame, text="0")
         self.cycle_count_label.grid(row=4, column=1, sticky=tk.W, padx=(5, 0))
         
+        # Transition timing frame
+        timing_frame = ttk.LabelFrame(main_frame, text="Transition Timing", padding="10")
+        timing_frame.grid(row=4, column=0, columnspan=3, sticky=(tk.W, tk.E), pady=(0, 10))
+        
+        ttk.Label(timing_frame, text="Current Phase:").grid(row=0, column=0, sticky=tk.W)
+        self.current_phase_label = ttk.Label(timing_frame, text="--")
+        self.current_phase_label.grid(row=0, column=1, sticky=tk.W, padx=(5, 0))
+        
+        ttk.Label(timing_frame, text="Transition Timer:").grid(row=1, column=0, sticky=tk.W)
+        self.transition_timer_label = ttk.Label(timing_frame, text="--:--")
+        self.transition_timer_label.grid(row=1, column=1, sticky=tk.W, padx=(5, 0))
+        
+        ttk.Label(timing_frame, text="Last Heating Time:").grid(row=0, column=2, sticky=tk.W, padx=(20, 0))
+        self.last_heating_time_label = ttk.Label(timing_frame, text="--:--")
+        self.last_heating_time_label.grid(row=0, column=3, sticky=tk.W, padx=(5, 0))
+        
+        ttk.Label(timing_frame, text="Last Cooling Time:").grid(row=1, column=2, sticky=tk.W, padx=(20, 0))
+        self.last_cooling_time_label = ttk.Label(timing_frame, text="--:--")
+        self.last_cooling_time_label.grid(row=1, column=3, sticky=tk.W, padx=(5, 0))
+        
+        ttk.Label(timing_frame, text="Avg Heating Time:").grid(row=0, column=4, sticky=tk.W, padx=(20, 0))
+        self.avg_heating_time_label = ttk.Label(timing_frame, text="--:--")
+        self.avg_heating_time_label.grid(row=0, column=5, sticky=tk.W, padx=(5, 0))
+        
+        ttk.Label(timing_frame, text="Avg Cooling Time:").grid(row=1, column=4, sticky=tk.W, padx=(20, 0))
+        self.avg_cooling_time_label = ttk.Label(timing_frame, text="--:--")
+        self.avg_cooling_time_label.grid(row=1, column=5, sticky=tk.W, padx=(5, 0))
+        
         # Control buttons
         button_frame = ttk.Frame(main_frame)
-        button_frame.grid(row=4, column=0, columnspan=3, pady=(10, 0))
+        button_frame.grid(row=5, column=0, columnspan=3, pady=(10, 0))
         
         self.start_button = ttk.Button(button_frame, text="Start Cycling", 
                                       command=self.start_cycling, state="disabled")
@@ -104,11 +139,15 @@ class TempCycleGUI:
         
         self.reset_counter_button = ttk.Button(button_frame, text="Reset Counter", 
                                               command=self.reset_cycle_counter)
-        self.reset_counter_button.grid(row=0, column=2)
+        self.reset_counter_button.grid(row=0, column=2, padx=(0, 10))
+        
+        self.reset_timing_button = ttk.Button(button_frame, text="Reset Timing", 
+                                             command=self.reset_timing_data)
+        self.reset_timing_button.grid(row=0, column=3)
         
         # Log display
         log_frame = ttk.LabelFrame(main_frame, text="Activity Log", padding="10")
-        log_frame.grid(row=5, column=0, columnspan=3, sticky=(tk.W, tk.E, tk.N, tk.S), pady=(10, 0))
+        log_frame.grid(row=6, column=0, columnspan=3, sticky=(tk.W, tk.E, tk.N, tk.S), pady=(10, 0))
         
         self.log_text = scrolledtext.ScrolledText(log_frame, height=10, width=70)
         self.log_text.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
@@ -117,7 +156,7 @@ class TempCycleGUI:
         self.root.columnconfigure(0, weight=1)
         self.root.rowconfigure(0, weight=1)
         main_frame.columnconfigure(0, weight=1)
-        main_frame.rowconfigure(5, weight=1)
+        main_frame.rowconfigure(6, weight=1)
         log_frame.columnconfigure(0, weight=1)
         log_frame.rowconfigure(0, weight=1)
         
@@ -398,7 +437,9 @@ class TempCycleGUI:
         consecutive_failures = 0
         max_failures = 5  # Increased tolerance for failures during stabilization
         last_gui_update = time.time()
+        last_transition_update = time.time()
         temp_read_interval = 3  # Read temperature every 3 seconds during stabilization
+        transition_started = False
         
         while not temp_stabilized and not self.stop_cycling:
             # Use extended timeout for temperature reads during stabilization
@@ -424,7 +465,21 @@ class TempCycleGUI:
             else:
                 consecutive_failures = 0
                 
+            # Start transition timing if not started yet
+            if not transition_started and self.transition_start_time is None:
+                self.start_transition_timing(current_temp, target_temp)
+                transition_started = True
+                
+            # Update transition timer every 5 seconds
+            if time.time() - last_transition_update >= 5:
+                self.update_transition_timer()
+                last_transition_update = time.time()
+                
             if abs(current_temp - target_temp) <= tolerance:
+                # Complete transition timing when we first reach target
+                if self.transition_start_time is not None:
+                    self.complete_transition_timing(current_temp)
+                    
                 if stabilization_start is None:
                     stabilization_start = time.time()
                     self.log_message(f"Temperature within range at {current_temp}°F. Starting stabilization timer.")
@@ -461,7 +516,79 @@ class TempCycleGUI:
         self.cycle_count = 0
         self.cycle_count_label.config(text="0")
         self.log_message("Cycle counter reset to 0")
+
+    def reset_timing_data(self):
+        """Reset all transition timing data"""
+        self.heating_times = []
+        self.cooling_times = []
+        self.transition_start_time = None
+        self.transition_start_temp = None
+        self.current_transition_type = None
         
+        # Reset GUI displays
+        self.current_phase_label.config(text="--")
+        self.transition_timer_label.config(text="--:--")
+        self.last_heating_time_label.config(text="--:--")
+        self.last_cooling_time_label.config(text="--:--")
+        self.avg_heating_time_label.config(text="--:--")
+        self.avg_cooling_time_label.config(text="--:--")
+        
+        self.log_message("Transition timing data reset")
+        
+    def start_transition_timing(self, current_temp, target_temp):
+        """Start timing a temperature transition"""
+        self.transition_start_time = time.time()
+        self.transition_start_temp = current_temp
+        
+        # Determine transition type
+        if target_temp > current_temp:
+            self.current_transition_type = "heating"
+            self.current_phase_label.config(text="Heating")
+        else:
+            self.current_transition_type = "cooling"
+            self.current_phase_label.config(text="Cooling")
+            
+        self.transition_timer_label.config(text="00:00")
+        self.log_message(f"Started {self.current_transition_type} from {current_temp:.1f}°F to {target_temp:.1f}°F")
+        
+    def update_transition_timer(self):
+        """Update the transition timer display"""
+        if self.transition_start_time:
+            elapsed_time = time.time() - self.transition_start_time
+            self.transition_timer_label.config(text=self.format_time(elapsed_time))
+            
+    def complete_transition_timing(self, final_temp):
+        """Complete timing a temperature transition and record the time"""
+        if self.transition_start_time and self.current_transition_type:
+            elapsed_time = time.time() - self.transition_start_time
+            elapsed_minutes = elapsed_time / 60
+            
+            # Record the time
+            if self.current_transition_type == "heating":
+                self.heating_times.append(elapsed_time)
+                self.last_heating_time_label.config(text=self.format_time(elapsed_time))
+                # Update average
+                if self.heating_times:
+                    avg_time = sum(self.heating_times) / len(self.heating_times)
+                    self.avg_heating_time_label.config(text=self.format_time(avg_time))
+            else:  # cooling
+                self.cooling_times.append(elapsed_time)
+                self.last_cooling_time_label.config(text=self.format_time(elapsed_time))
+                # Update average
+                if self.cooling_times:
+                    avg_time = sum(self.cooling_times) / len(self.cooling_times)
+                    self.avg_cooling_time_label.config(text=self.format_time(avg_time))
+            
+            self.log_message(f"Completed {self.current_transition_type} in {elapsed_minutes:.1f} minutes "
+                           f"(from {self.transition_start_temp:.1f}°F to {final_temp:.1f}°F)")
+            
+            # Reset transition tracking
+            self.transition_start_time = None
+            self.transition_start_temp = None
+            self.current_transition_type = None
+            self.current_phase_label.config(text="Stabilizing")
+            self.transition_timer_label.config(text="--:--")
+
     def increment_cycle_counter(self):
         """Increment the cycle counter and update display"""
         self.cycle_count += 1
@@ -527,10 +654,12 @@ class TempCycleGUI:
             self.cycling_status_label.config(text="Stopped")
             self.target_temp_label.config(text="--°F")
             self.timer_label.config(text="--:--")
+            self.current_phase_label.config(text="--")
+            self.transition_timer_label.config(text="--:--")
             self.start_button.config(state="normal")
             self.stop_button.config(state="disabled")
             self.stop_cycling = False
-            
+
     def start_cycling(self):
         if not self.is_connected:
             self.log_message("Error: Not connected to device. Attempting reconnection...")
