@@ -32,6 +32,9 @@ class TempCycleGUI:
         self.cooling_times = []  # List to store cooling transition times
         self.current_transition_type = None  # 'heating' or 'cooling'
         
+        # Hold time configuration (default 5 minutes = 300 seconds)
+        self.hold_time_seconds = 300
+        
         self.setup_gui()
         self.connect_to_device()
         
@@ -61,6 +64,10 @@ class TempCycleGUI:
         ttk.Label(temp_frame, text="High Temperature (°F):").grid(row=1, column=0, sticky=tk.W)
         self.high_temp_var = tk.StringVar(value="140")
         ttk.Entry(temp_frame, textvariable=self.high_temp_var, width=10).grid(row=1, column=1, padx=(5, 0))
+        
+        ttk.Label(temp_frame, text="Hold Time (minutes):").grid(row=2, column=0, sticky=tk.W)
+        self.hold_time_var = tk.StringVar(value="5")
+        ttk.Entry(temp_frame, textvariable=self.hold_time_var, width=10).grid(row=2, column=1, padx=(5, 0))
         
         # Timeout settings frame
         timeout_frame = ttk.LabelFrame(main_frame, text="Communication Settings", padding="10")
@@ -184,6 +191,20 @@ class TempCycleGUI:
             self.gpib_timeout = 5000
             self.temp_read_timeout = 10000
         
+    def update_hold_time(self):
+        """Update hold time from GUI input"""
+        try:
+            hold_time_minutes = float(self.hold_time_var.get())
+            if hold_time_minutes <= 0:
+                hold_time_minutes = 5  # Default to 5 minutes if invalid
+                self.hold_time_var.set("5")
+            self.hold_time_seconds = int(hold_time_minutes * 60)
+            self.log_message(f"Hold time updated to {hold_time_minutes} minutes ({self.hold_time_seconds} seconds)")
+        except ValueError:
+            self.log_message("Invalid hold time value. Using default 5 minutes")
+            self.hold_time_var.set("5")
+            self.hold_time_seconds = 300
+
     def format_time(self, seconds):
         """Format seconds into minutes:seconds format"""
         minutes = int(seconds // 60)
@@ -431,7 +452,12 @@ class TempCycleGUI:
         # Schedule next update
         self.root.after(3000, self.monitor_temperature)  # Increased to 3 seconds to reduce load
         
-    def wait_for_temp_stabilization(self, target_temp, tolerance=2.5, stabilization_time=600):
+    def wait_for_temp_stabilization(self, target_temp, tolerance=2.5, stabilization_time=None):
+        # Use configured hold time if not specified
+        if stabilization_time is None:
+            self.update_hold_time()  # Update from GUI
+            stabilization_time = self.hold_time_seconds
+            
         temp_stabilized = False
         stabilization_start = None
         consecutive_failures = 0
@@ -482,8 +508,8 @@ class TempCycleGUI:
                     
                 if stabilization_start is None:
                     stabilization_start = time.time()
-                    self.log_message(f"Temperature within range at {current_temp}°F. Starting stabilization timer.")
-                    self.timer_label.config(text="00:00/10:00")
+                    self.log_message(f"Temperature within range at {current_temp}°F. Starting {stabilization_time/60:.1f} minute hold timer.")
+                    self.timer_label.config(text=f"00:00/{self.format_time(stabilization_time)}")
                 else:
                     elapsed_time = time.time() - stabilization_start
                     
