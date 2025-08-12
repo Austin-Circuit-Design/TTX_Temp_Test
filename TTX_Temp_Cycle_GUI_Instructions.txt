@@ -1,0 +1,150 @@
+===============================================================================
+                    TEMPERATURE CYCLING GUI 
+===============================================================================
+
+SYSTEM REQUIREMENTS
+-------------------
+- Python 3.x with the following packages:
+  * tkinter (usually included with Python)
+  * pyvisa
+  * threading
+  * time
+  * datetime
+- GPIB interface hardware
+- ICS-4899A temperature chamber connected via GPIB (Address 4)
+
+STARTING THE APPLICATION
+------------------------
+1. Ensure the temperature chamber is connected via GPIB
+2. Run the application by running batch file on the home screen
+3. The GUI will automatically attempt to connect to the GPIB device
+4. Connection status will be displayed at the top of the window
+
+GUI LAYOUT AND COMPONENTS
+-------------------------
+
+1. CONNECTION STATUS
+   - Located at the top of the window
+   - Shows current connection status: Connected/Disconnected/Connection Failed
+   - Green = Connected, Red = Disconnected/Failed
+
+2. TEMPERATURE SETTINGS FRAME
+   - Low Temperature (°F): Set the lower temperature limit for cycling
+   - High Temperature (°F): Set the upper temperature limit for cycling  
+   - Hold Time (minutes): Duration to maintain each temperature after reaching target
+   - Default values: Low=32°F, High=140°F, Hold=5 minutes
+
+3. COMMUNICATION SETTINGS FRAME
+   - GPIB Timeout (ms): Communication timeout for GPIB operations
+   - Default: 5000ms (5 seconds)
+   - Click "Apply" button to update timeout settings
+
+4. CURRENT STATUS FRAME
+   - Current Temperature: Real-time chamber temperature reading
+   - Target Temperature: Currently set target temperature
+   - Cycling Status: Current operation status (Stopped/Running/Stopping)
+   - Hold Timer: Progress of current hold period (elapsed/total time)
+   - Cycle Count: Number of complete temperature cycles completed
+
+5. TRANSITION TIMING FRAME
+   - Current Phase: Current operation (Heating/Cooling/Stabilizing)
+   - Transition Timer: Time elapsed during current temperature transition
+   - Last Heating Time: Duration of most recent heating transition
+   - Last Cooling Time: Duration of most recent cooling transition
+   - Avg Heating Time: Average heating transition time across all cycles
+   - Avg Cooling Time: Average cooling transition time across all cycles
+
+6. CONTROL BUTTONS
+   - Start Cycling: Begin automated temperature cycling
+   - Stop Cycling: Stop current cycling operation
+   - Reset Counter: Reset cycle counter to zero
+   - Reset Timing: Clear all transition timing data
+
+7. ACTIVITY LOG
+   - Scrollable text area showing all system activities
+   - Timestamped entries for all operations
+   - Includes temperature readings, errors, and status changes
+
+OPERATING 
+--------------------
+
+STARTING TEMPERATURE CYCLING:
+1. Ensure all temperature settings are configured
+2. Click "Start Cycling" button
+3. Monitor the cycling progress in the Current Status and Activity Log
+4. The system will automatically:
+   - Turn on the temperature chamber
+   - Cycle between low and high temperatures
+   - Maintain each temperature for the specified hold time
+   - Track transition times and cycle counts
+
+MONITORING:
+1. Current Temperature: Updates every 3 seconds during operation
+2. Target Temperature: Shows the currently set temperature goal
+3. Hold Timer: Shows progress during temperature stabilization periods
+4. Transition Timer: Shows time elapsed during heating/cooling phases
+5. Activity Log: Provides detailed information about all operations
+
+STOPPING:
+1. Click "Stop Cycling" to halt operations
+2. System will complete current operation before stopping
+3. Temperature chamber will be automatically turned off
+4. All timing and status displays will be reset
+
+TRANSITION TIMING:
+- System automatically tracks heating vs cooling transition times
+- Calculates average times to help optimize cycling parameters
+- Times are displayed in MM:SS format
+- Use "Reset Timing" to clear historical data
+
+CYCLE COUNTING:
+- Automatically increments after each complete cycle (low→high→low)
+- Use "Reset Counter" to start counting from zero
+- Counter persists until manually reset
+
+CONFIGURATION 
+-------------------------
+
+Temperature Settings:
+- Low Temperature: Minimum cycling temperature (default: 32°F) (Oven can go as low as -40°F)
+- High Temperature: Maximum cycling temperature (default: 140°F)(Oven can go as high as 266°F)
+- Hold Time: Stabilization time at each temperature (default: 5 minutes)
+
+Communication Settings:
+- GPIB Timeout: Base timeout for GPIB operations (default: 5000ms)
+- Temperature Read Timeout: Extended timeout for temp reads (2x base timeout)
+- Retry Count: Number of retry attempts for failed operations (default: 3)
+
+Stabilization Parameters:
+- Temperature Tolerance: ±2.5°F (how close to target before considering "reached")
+- Stabilization Time: User-configurable hold time
+- Temperature Read Interval: 3 seconds during stabilization
+
+
+TROUBLESHOOTING
+---------------
+
+Connection Issues:
+- Verify GPIB cable connections
+- Check device, if red light, power on and power off the control box on top of oven
+
+Temperature Control Issues:
+- Verify chamber is powered on 
+- Check temperature settings are within chamber capabilities
+- Increase hold time if temperatures are not stabilizing
+- Make sure the oven is cooling or heating. Power cycle if having issue
+
+Data Reset:
+- Use "Reset Counter" to clear cycle count
+- Use "Reset Timing" to clear transition timing history
+- Restart application to reset all parameters to defaults
+
+ERROR MESSAGES AND MEANINGS
+---------------------------
+- "Connection Failed": Cannot establish GPIB communication
+- "Temperature read failure": Cannot read current temperature
+- "GPIB timeout": Communication timeout occurred
+- "Failed to set temperature": Cannot send temperature command
+- "Reconnection failed": Automatic reconnection unsuccessful
+
+
