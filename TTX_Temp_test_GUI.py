@@ -560,200 +560,120 @@ class TempCycleGUI:
                     return None
         return None
 
-    def monitor_temperature(self):
-        if self.is_connected:
-            current_temp = self.read_temp(100)
-            if current_temp is not None:
-                self.current_temp_label.config(text=f"{current_temp}°F")
-            else:
-                self.current_temp_label.config(text="--°F")
-                # Try to reconnect if we lost connection
-                if not self.is_connected:
-                    self.log_message("Lost connection during monitoring. Attempting reconnection...")
-                    self.reconnect_device()
-                
-        # Schedule next update
-        self.root.after(3000, self.monitor_temperature)  # Increased to 3 seconds to reduce load
-        
-    def wait_for_temp_stabilization(self, target_temp, tolerance=2.5, stabilization_time=None):
-        # Use configured hold time if not specified
-        if stabilization_time is None:
-            self.update_hold_time()  # Update from GUI
-            stabilization_time = self.hold_time_seconds
-            
-        temp_stabilized = False
-        stabilization_start = None
-        consecutive_failures = 0
-        max_failures = 3  # Reduced - force reconnection sooner
-        last_gui_update = time.time()
-        last_transition_update = time.time()
-        temp_read_interval = 5  # Slightly longer interval to reduce communication stress
-        transition_started = False
-        last_comm_check = time.time()
-        
-        while not temp_stabilized and not self.stop_cycling:
-            # Check communication health every 30 seconds
-            if time.time() - last_comm_check > 30:
-                if not self.check_communication_health():
-                    self.log_message("Communication health check failed during stabilization")
-                    if not self.reconnect_device():
-                        self.log_message("Failed to restore communication. Stopping cycling.")
-                        return False
-                last_comm_check = time.time()
-            
-            # Use extended timeout for temperature reads during stabilization
-            current_temp = self.read_temp(100, extended_timeout=True)
-            
-            if current_temp is None:
-                consecutive_failures += 1
-                self.log_message(f"Temperature read failure {consecutive_failures}/{max_failures}")
-                
-                if consecutive_failures >= max_failures:
-                    self.log_message("Communication failures detected. Attempting reconnection...")
-                    if self.reconnect_device():
-                        consecutive_failures = 0
-                        time.sleep(3)  # Wait after reconnection
-                        continue
-                    else:
-                        self.log_message("Reconnection failed. Stopping temperature cycling.")
-                        return False
-                        
-                # Wait longer between failed attempts during stabilization
-                time.sleep(8)  # Longer wait to allow system recovery
-                continue
-            else:
-                consecutive_failures = 0
-                
-            # Start transition timing if not started yet
-            if not transition_started and self.transition_start_time is None:
-                self.start_transition_timing(current_temp, target_temp)
-                transition_started = True
-                
-            # Update transition timer every 5 seconds
-            if time.time() - last_transition_update >= 5:
-                self.update_transition_timer()
-                last_transition_update = time.time()
-                
-            if abs(current_temp - target_temp) <= tolerance:
-                # Complete transition timing when we first reach target
-                if self.transition_start_time is not None:
-                    self.complete_transition_timing(current_temp)
-                    
-                if stabilization_start is None:
-                    stabilization_start = time.time()
-                    self.log_message(f"Temperature within range at {current_temp}°F. Starting {stabilization_time/60:.1f} minute hold timer.")
-                    self.timer_label.config(text=f"00:00/{self.format_time(stabilization_time)}")
-                else:
-                    elapsed_time = time.time() - stabilization_start
-                    
-                    # Update GUI timer every 10 seconds during stabilization
-                    if time.time() - last_gui_update >= 10:
-                        self.update_timer_display(elapsed_time, stabilization_time)
-                        self.log_message(f"Stabilizing at {current_temp}°F - {self.format_time(elapsed_time)}/{self.format_time(stabilization_time)}")
-                        last_gui_update = time.time()
-                    
-                    if elapsed_time >= stabilization_time:
-                        temp_stabilized = True
-                        self.log_message(f"Temperature stabilized at {current_temp}°F for {stabilization_time/60:.1f} minutes. ✓")
-                        self.timer_label.config(text="Complete")
-            else:
-                stabilization_start = None
-                self.timer_label.config(text="--:--")
-                self.log_message(f"Waiting for temperature to stabilize... Current: {current_temp}°F, Target: {target_temp}°F")
-                last_gui_update = time.time()
-            
-            # Check for stop signal more frequently but read temp less frequently
-            for _ in range(temp_read_interval * 10):  # Check stop signal every 0.1 seconds
-                if self.stop_cycling:
-                    return False
-                time.sleep(0.1)
-                
-        return temp_stabilized
-        
-    def reset_cycle_counter(self):
-        """Reset the cycle counter to zero"""
-        self.cycle_count = 0
-        self.cycle_count_label.config(text="0")
-        self.log_message("Cycle counter reset to 0")
+    def read_temp(self, addr, extended_timeout=False):
+        """Read temperature wrapper method"""
+        return self.read_temp_with_retry(addr, extended_timeout)
 
-    def reset_timing_data(self):
-        """Reset all transition timing data"""
-        self.heating_times = []
-        self.cooling_times = []
-        self.transition_start_time = None
-        self.transition_start_temp = None
-        self.current_transition_type = None
-        
-        # Reset GUI displays
-        self.current_phase_label.config(text="--")
-        self.transition_timer_label.config(text="--:--")
-        self.last_heating_time_label.config(text="--:--")
-        self.last_cooling_time_label.config(text="--:--")
-        self.avg_heating_time_label.config(text="--:--")
-        self.avg_cooling_time_label.config(text="--:--")
-        
-        self.log_message("Transition timing data reset")
-        
-    def start_transition_timing(self, current_temp, target_temp):
-        """Start timing a temperature transition"""
-        self.transition_start_time = time.time()
-        self.transition_start_temp = current_temp
-        
-        # Determine transition type
-        if target_temp > current_temp:
-            self.current_transition_type = "heating"
-            self.current_phase_label.config(text="Heating")
-        else:
-            self.current_transition_type = "cooling"
-            self.current_phase_label.config(text="Cooling")
-            
-        self.transition_timer_label.config(text="00:00")
-        self.log_message(f"Started {self.current_transition_type} from {current_temp:.1f}°F to {target_temp:.1f}°F")
-        
-    def update_transition_timer(self):
-        """Update the transition timer display"""
-        if self.transition_start_time:
-            elapsed_time = time.time() - self.transition_start_time
-            self.transition_timer_label.config(text=self.format_time(elapsed_time))
-            
-    def complete_transition_timing(self, final_temp):
-        """Complete timing a temperature transition and record the time"""
-        if self.transition_start_time and self.current_transition_type:
-            elapsed_time = time.time() - self.transition_start_time
-            elapsed_minutes = elapsed_time / 60
-            
-            # Record the time
-            if self.current_transition_type == "heating":
-                self.heating_times.append(elapsed_time)
-                self.last_heating_time_label.config(text=self.format_time(elapsed_time))
-                # Update average
-                if self.heating_times:
-                    avg_time = sum(self.heating_times) / len(self.heating_times)
-                    self.avg_heating_time_label.config(text=self.format_time(avg_time))
-            else:  # cooling
-                self.cooling_times.append(elapsed_time)
-                self.last_cooling_time_label.config(text=self.format_time(elapsed_time))
-                # Update average
-                if self.cooling_times:
-                    avg_time = sum(self.cooling_times) / len(self.cooling_times)
-                    self.avg_cooling_time_label.config(text=self.format_time(avg_time))
-            
-            self.log_message(f"Completed {self.current_transition_type} in {elapsed_minutes:.1f} minutes "
-                           f"(from {self.transition_start_temp:.1f}°F to {final_temp:.1f}°F)")
-            
-            # Reset transition tracking
-            self.transition_start_time = None
-            self.transition_start_temp = None
-            self.current_transition_type = None
-            self.current_phase_label.config(text="Stabilizing")
-            self.transition_timer_label.config(text="--:--")
+    def write_temp(self, addr, value):
+        """Write temperature setpoint to the chamber"""
+        set_cmd = "W " + str(addr) + ", " + str(int(value * (10 ** self.decimal)))
+        return self.gpib_wrt_with_retry(set_cmd)
 
-    def increment_cycle_counter(self):
-        """Increment the cycle counter and update display"""
-        self.cycle_count += 1
-        self.cycle_count_label.config(text=str(self.cycle_count))
-        self.log_message(f"Completed cycle #{self.cycle_count}")
+    def gpib_rd(self, cmd):
+        """Single attempt GPIB read for backward compatibility"""
+        return self.gpib_rd_with_retry(cmd, 1)
+
+    def gpib_wrt(self, cmd):
+        """Single attempt GPIB write for backward compatibility"""
+        return self.gpib_wrt_with_retry(cmd, 1)
+
+    def reconnect_device(self):
+        """Enhanced reconnection with power cycling capability"""
+        self.log_message("Attempting to reconnect to GPIB device...")
         
+        # If we've had too many consecutive failures, try power cycling
+        if self.consecutive_comm_failures >= self.max_comm_failures:
+            self.log_message("Too many communication failures - attempting power cycle recovery")
+            
+            # Try power cycling first
+            if self.power_cycle_chamber():
+                # Reset failure counter after power cycle
+                self.consecutive_comm_failures = 0
+                # Reconnect to power supply in case we lost it
+                self.connect_to_power_supply()
+            else:
+                self.log_message("Power cycle failed - proceeding with software reset")
+                
+            # Perform hardware reset regardless
+            if not self.force_hardware_reset():
+                return False
+        
+        try:
+            # Close existing connections
+            if self.ics_4899a:
+                try:
+                    self.ics_4899a.close()
+                except:
+                    pass
+            
+            if self.rm:
+                try:
+                    self.rm.close()
+                except:
+                    pass
+            
+            # Wait before reconnecting
+            time.sleep(3)  # Increased wait time
+            
+            # Reinitialize connection with fresh resource manager
+            self.rm = pyvisa.ResourceManager()
+            
+            # Try to open with more robust settings
+            self.ics_4899a = self.rm.open_resource("GPIB0::4::INSTR")
+            
+            # Configure with more conservative settings
+            self.ics_4899a.timeout = max(self.gpib_timeout, 10000)  # At least 10 seconds
+            self.ics_4899a.read_termination = '\n'
+            self.ics_4899a.write_termination = '\n'
+            
+            # Clear any pending operations
+            try:
+                self.ics_4899a.clear()
+                time.sleep(1)
+            except:
+                pass
+            
+            # Test connection with multiple attempts
+            connection_verified = False
+            for attempt in range(5):  # More attempts
+                try:
+                    time.sleep(2)  # Wait between attempts
+                    test_response = self.ics_4899a.query("*IDN?")
+                    if test_response and test_response.strip():
+                        # Verify we can read decimal configuration
+                        decimal_response = self.gpib_rd_with_retry("R? 606, 1")
+                        if decimal_response:
+                            self.decimal = int(decimal_response)
+                            # Verify we can read temperature
+                            temp = self.read_temp_with_retry(100)
+                            if temp is not None:
+                                connection_verified = True
+                                break
+                    time.sleep(2)  # Wait between attempts
+                except Exception as e:
+                    self.log_message(f"Connection verification attempt {attempt + 1} failed: {e}")
+                    continue
+            
+            if connection_verified:
+                self.is_connected = True
+                self.consecutive_comm_failures = 0  # Reset failure counter
+                self.last_successful_temp_read = time.time()
+                self.connection_label.config(text="Status: Reconnected", foreground="green")
+                self.log_message("Successfully reconnected to GPIB device")
+                # Reconnect to power supply if we lost it
+                if not self.power_supply:
+                    self.connect_to_power_supply()
+                return True
+            else:
+                raise Exception("Failed to verify stable connection after multiple attempts")
+                
+        except Exception as e:
+            self.is_connected = False
+            self.consecutive_comm_failures += 1
+            self.connection_label.config(text="Status: Connection Failed", foreground="red")
+            self.log_message(f"Reconnection failed: {e}")
+            return False
+
     def cycling_worker(self):
         try:
             low_temp = float(self.low_temp_var.get())
@@ -905,6 +825,7 @@ class TempCycleGUI:
                 pass
             
         self.root.destroy()
+
 
 def main():
     root = tk.Tk()
