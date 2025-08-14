@@ -355,13 +355,13 @@ class TempCycleGUI:
             self.log_message(f"Performing power cycle #{self.power_cycles_performed} - Turning output OFF")
             
             # Turn output off
-            self.power_supply.write("OUTPUT OFF")
+            self.power_supply.write("OUTPut CH1,OFF")
             time.sleep(2)  # Wait 2 seconds
             
             self.log_message("Power cycle - Turning output ON")
             
             # Turn output on
-            self.power_supply.write("OUTPUT ON")
+            self.power_supply.write("OUTPut CH1,ON")
             time.sleep(2)  # Wait 2 seconds
             
             self.log_message("Power cycle completed - waiting for chamber to stabilize")
@@ -752,7 +752,7 @@ class TempCycleGUI:
         self.cycle_count += 1
         self.cycle_count_label.config(text=str(self.cycle_count))
         self.log_message(f"Completed cycle #{self.cycle_count}")
-        
+
     def read_temp(self, addr, extended_timeout=False):
         """Read temperature wrapper method"""
         return self.read_temp_with_retry(addr, extended_timeout)
