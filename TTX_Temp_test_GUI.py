@@ -35,9 +35,21 @@ class TempCycleGUI:
         # Hold time configuration (default 5 minutes = 300 seconds)
         self.hold_time_seconds = 300
         
+        # Enhanced error tracking and recovery
+        self.consecutive_comm_failures = 0
+        self.max_comm_failures = 3
+        self.last_successful_temp_read = time.time()
+        self.comm_health_timeout = 30  # seconds before considering communication unhealthy
+        
+        # Power supply control for recovery
+        self.power_supply = None
+        self.power_supply_resource = "USB0::0xF4EC::0xF4EC::SPD13DCD6R1562::INSTR"
+        self.power_cycles_performed = 0
+        
         self.setup_gui()
         self.connect_to_device()
-        
+        self.connect_to_power_supply()
+
     def setup_gui(self):
         # Main frame
         main_frame = ttk.Frame(self.root, padding="10")
@@ -310,6 +322,100 @@ class TempCycleGUI:
             self.log_message(f"Connection failed: {e}")
             self.connection_label.config(text="Status: Connection Failed", foreground="red")
     
+    def connect_to_power_supply(self):
+        """Connect to the power supply for automatic power cycling"""
+        try:
+            if not self.rm:
+                self.rm = pyvisa.ResourceManager()
+            
+            self.power_supply = self.rm.open_resource(self.power_supply_resource)
+            self.power_supply.timeout = 5000  # 5 second timeout
+            
+            # Test power supply connection
+            idn_response = self.power_supply.query("*IDN?")
+            if idn_response and idn_response.strip():
+                self.log_message(f"Power supply connected: {idn_response.strip()}")
+                return True
+            else:
+                raise Exception("No response from power supply")
+                
+        except Exception as e:
+            self.log_message(f"Power supply connection failed: {e}")
+            self.power_supply = None
+            return False
+
+    def power_cycle_chamber(self):
+        """Cycle power to the chamber using the power supply"""
+        if not self.power_supply:
+            self.log_message("Power supply not available - cannot perform power cycle")
+            return False
+        
+        try:
+            self.power_cycles_performed += 1
+            self.log_message(f"Performing power cycle #{self.power_cycles_performed} - Turning output OFF")
+            
+            # Turn output off
+            self.power_supply.write("OUTPUT OFF")
+            time.sleep(2)  # Wait 2 seconds
+            
+            self.log_message("Power cycle - Turning output ON")
+            
+            # Turn output on
+            self.power_supply.write("OUTPUT ON")
+            time.sleep(2)  # Wait 2 seconds
+            
+            self.log_message("Power cycle completed - waiting for chamber to stabilize")
+            time.sleep(3)  # Additional time for chamber to boot up
+            
+            return True
+            
+        except Exception as e:
+            self.log_message(f"Power cycle failed: {e}")
+            return False
+
+    def check_communication_health(self):
+        """Check if GPIB communication is healthy and force reconnection if needed"""
+        current_time = time.time()
+        if current_time - self.last_successful_temp_read > self.comm_health_timeout:
+            self.log_message("Communication health check failed - forcing reconnection")
+            self.is_connected = False
+            return False
+        return True
+
+    def force_hardware_reset(self):
+        """Force a complete hardware reset of GPIB connection with power cycling"""
+        self.log_message("Performing forced hardware reset...")
+        try:
+            # Close all connections aggressively
+            if self.ics_4899a:
+                try:
+                    self.ics_4899a.clear()
+                    self.ics_4899a.close()
+                except:
+                    pass
+                finally:
+                    self.ics_4899a = None
+            
+            if self.rm:
+                try:
+                    self.rm.close()
+                except:
+                    pass
+                finally:
+                    self.rm = None
+            
+            # Wait longer for hardware to reset
+            time.sleep(5)
+            
+            # Force resource manager refresh
+            pyvisa.ResourceManager.close_if_open()
+            
+            return True
+            
+        except Exception as e:
+            self.log_message(f"Hardware reset failed: {e}")
+            return False
+
     def gpib_rd_with_retry(self, cmd, retries=None, extended_timeout=False):
         """GPIB read with retry logic"""
         if retries is None:
@@ -365,27 +471,47 @@ class TempCycleGUI:
         return ""
 
     def gpib_wrt_with_retry(self, cmd, retries=None):
-        """GPIB write with retry logic"""
+        """Enhanced GPIB write with better error handling"""
         if retries is None:
             retries = self.retry_count
             
         for attempt in range(retries):
             try:
-                time.sleep(0.3)
+                # Check connection health before critical operations
+                if not self.check_communication_health():
+                    self.is_connected = False
+                    return False
+                
+                time.sleep(0.5)  # Longer delay for stability
                 self.ics_4899a.write(cmd)
+                
+                # Verify write was successful by brief delay and connection check
+                time.sleep(0.2)
                 return True
+                
             except (pyvisa.errors.VisaIOError, pyvisa.errors.InvalidSession) as e:
                 error_msg = str(e)
-                if "I/O" in error_msg and attempt == 1:  # On second attempt for I/O errors
-                    try:
-                        self.ics_4899a.clear()  # Clear any pending operations
-                        time.sleep(1)
-                    except:
-                        pass
-                        
+                self.consecutive_comm_failures += 1
+                
+                # Handle specific error types
+                if "VI_ERROR_IO" in error_msg or "I/O" in error_msg:
+                    self.log_message(f"I/O error for '{cmd}', attempt {attempt + 1}/{retries}: Hardware communication failure")
+                    if attempt == 0:  # On first I/O error, try immediate recovery
+                        try:
+                            self.ics_4899a.clear()
+                            time.sleep(2)
+                        except:
+                            pass
+                elif "VI_ERROR_NLISTENERS" in error_msg or "NLISTENERS" in error_msg:
+                    self.log_message(f"No listeners error for '{cmd}', attempt {attempt + 1}/{retries}: Device not responding")
+                    # This is a serious error - device is not responding
+                    if attempt < retries - 1:
+                        time.sleep(3)  # Wait longer for device recovery
+                else:
+                    self.log_message(f"GPIB write error for '{cmd}', attempt {attempt + 1}/{retries}: {e}")
+                
                 if attempt < retries - 1:
-                    self.log_message(f"GPIB write error for '{cmd}', retry {attempt + 1}/{retries}: {e}")
-                    time.sleep(2)
+                    time.sleep(3)  # Longer wait between error retries
                     continue
                 else:
                     self.log_message(f"GPIB Write failed after {retries} attempts: {e}")
@@ -393,50 +519,47 @@ class TempCycleGUI:
                     
         return False
 
-    def gpib_rd(self, cmd):
-        return self.gpib_rd_with_retry(cmd, 1)  # Single attempt for backward compatibility
-
-    def gpib_wrt(self, cmd):
-        return self.gpib_wrt_with_retry(cmd, 1)  # Single attempt for backward compatibility
-
     def read_temp_with_retry(self, addr, extended_timeout=False):
-        """Read temperature with retry logic"""
+        """Enhanced temperature reading with better error recovery"""
         for attempt in range(self.retry_count):
             try:
                 response = self.gpib_rd_with_retry("R? " + str(addr) + ", 1", extended_timeout=extended_timeout)
                 if not response or response == "":
+                    self.consecutive_comm_failures += 1
                     if attempt < self.retry_count - 1:
                         self.log_message(f"Empty temperature response, retry {attempt + 1}/{self.retry_count}")
-                        time.sleep(1)
+                        time.sleep(2)  # Longer wait
                         continue
                     return None
+                
                 temp_raw = int(response)
-                return float(temp_raw / (10 ** self.decimal))
+                temp_value = float(temp_raw / (10 ** self.decimal))
+                
+                # Temperature read successful - reset failure counters
+                self.consecutive_comm_failures = 0
+                self.last_successful_temp_read = time.time()
+                return temp_value
+                
             except (ValueError, TypeError) as e:
+                self.consecutive_comm_failures += 1
                 if attempt < self.retry_count - 1:
                     self.log_message(f"Temperature conversion error, retry {attempt + 1}: {e}")
-                    time.sleep(1)
+                    time.sleep(2)
                     continue
                 else:
                     self.log_message(f"Temperature conversion error after {self.retry_count} attempts: {e}")
                     return None
             except Exception as e:
+                self.consecutive_comm_failures += 1
                 if attempt < self.retry_count - 1:
                     self.log_message(f"Temperature read error, retry {attempt + 1}: {e}")
-                    time.sleep(1)
+                    time.sleep(2)
                     continue
                 else:
                     self.log_message(f"Temperature read error after {self.retry_count} attempts: {e}")
                     return None
         return None
 
-    def read_temp(self, addr, extended_timeout=False):
-        return self.read_temp_with_retry(addr, extended_timeout)
-
-    def write_temp(self, addr, value):
-        set_cmd = "W " + str(addr) + ", " + str(int(value * (10 ** self.decimal)))
-        return self.gpib_wrt_with_retry(set_cmd)
-        
     def monitor_temperature(self):
         if self.is_connected:
             current_temp = self.read_temp(100)
@@ -461,13 +584,23 @@ class TempCycleGUI:
         temp_stabilized = False
         stabilization_start = None
         consecutive_failures = 0
-        max_failures = 5  # Increased tolerance for failures during stabilization
+        max_failures = 3  # Reduced - force reconnection sooner
         last_gui_update = time.time()
         last_transition_update = time.time()
-        temp_read_interval = 3  # Read temperature every 3 seconds during stabilization
+        temp_read_interval = 5  # Slightly longer interval to reduce communication stress
         transition_started = False
+        last_comm_check = time.time()
         
         while not temp_stabilized and not self.stop_cycling:
+            # Check communication health every 30 seconds
+            if time.time() - last_comm_check > 30:
+                if not self.check_communication_health():
+                    self.log_message("Communication health check failed during stabilization")
+                    if not self.reconnect_device():
+                        self.log_message("Failed to restore communication. Stopping cycling.")
+                        return False
+                last_comm_check = time.time()
+            
             # Use extended timeout for temperature reads during stabilization
             current_temp = self.read_temp(100, extended_timeout=True)
             
@@ -476,7 +609,7 @@ class TempCycleGUI:
                 self.log_message(f"Temperature read failure {consecutive_failures}/{max_failures}")
                 
                 if consecutive_failures >= max_failures:
-                    self.log_message("Too many consecutive temperature read failures. Attempting reconnection...")
+                    self.log_message("Communication failures detected. Attempting reconnection...")
                     if self.reconnect_device():
                         consecutive_failures = 0
                         time.sleep(3)  # Wait after reconnection
@@ -486,7 +619,7 @@ class TempCycleGUI:
                         return False
                         
                 # Wait longer between failed attempts during stabilization
-                time.sleep(5)
+                time.sleep(8)  # Longer wait to allow system recovery
                 continue
             else:
                 consecutive_failures = 0
@@ -628,11 +761,27 @@ class TempCycleGUI:
             
             self.log_message(f"Starting temperature cycling between {low_temp}°F and {high_temp}°F")
             
-            # Turn chamber on with error checking and retries
-            if not self.gpib_wrt_with_retry("W 2000, 1"):
-                self.log_message("Failed to turn chamber on. Stopping...")
-                return
-            time.sleep(2)  # Longer delay after turning on
+            # Reset communication failure counters at start
+            self.consecutive_comm_failures = 0
+            self.last_successful_temp_read = time.time()
+            
+            # Turn chamber on with enhanced error checking
+            chamber_on_attempts = 0
+            while chamber_on_attempts < 3:
+                if self.gpib_wrt_with_retry("W 2000, 1"):
+                    break
+                chamber_on_attempts += 1
+                self.log_message(f"Failed to turn chamber on, attempt {chamber_on_attempts}/3")
+                if chamber_on_attempts < 3:
+                    if not self.reconnect_device():
+                        self.log_message("Cannot establish connection. Stopping...")
+                        return
+                    time.sleep(2)
+                else:
+                    self.log_message("Failed to turn chamber on after 3 attempts. Stopping...")
+                    return
+            
+            time.sleep(3)  # Longer delay after turning on
             
             while not self.stop_cycling:
                 cycle_temps = [low_temp, high_temp]
@@ -644,16 +793,26 @@ class TempCycleGUI:
                     self.target_temp_label.config(text=f"{temp}°F")
                     self.timer_label.config(text="--:--")
                     
-                    # Write temperature with error checking and retries
-                    if not self.write_temp(300, temp):
-                        self.log_message("Failed to set temperature. Attempting reconnection...")
-                        if not self.reconnect_device():
-                            self.log_message("Cannot reconnect. Stopping cycling.")
+                    # Enhanced temperature setting with multiple attempts
+                    temp_set_attempts = 0
+                    temp_set_success = False
+                    while temp_set_attempts < 3 and not temp_set_success:
+                        if self.write_temp(300, temp):
+                            temp_set_success = True
                             break
-                        # Retry temperature setting after reconnection
-                        if not self.write_temp(300, temp):
-                            self.log_message("Failed to set temperature after reconnection. Stopping cycling.")
-                            break
+                        
+                        temp_set_attempts += 1
+                        self.log_message(f"Failed to set temperature, attempt {temp_set_attempts}/3")
+                        
+                        if temp_set_attempts < 3:
+                            if not self.reconnect_device():
+                                self.log_message("Cannot reconnect. Stopping cycling.")
+                                return
+                            time.sleep(2)
+                    
+                    if not temp_set_success:
+                        self.log_message("Failed to set temperature after 3 attempts. Stopping cycling.")
+                        break
                     
                     # Wait for temperature stabilization
                     if not self.wait_for_temp_stabilization(temp):
@@ -669,12 +828,19 @@ class TempCycleGUI:
         except Exception as e:
             self.log_message(f"An error occurred: {e}")
         finally:
-            # Turn chamber off with retries
+            # Enhanced chamber shutdown
             if self.is_connected:
-                if self.gpib_wrt_with_retry("W 2000, 0"):
-                    self.log_message("Chamber turned off.")
-                else:
-                    self.log_message("Warning: Could not confirm chamber was turned off.")
+                shutdown_attempts = 0
+                while shutdown_attempts < 3:
+                    if self.gpib_wrt_with_retry("W 2000, 0"):
+                        self.log_message("Chamber turned off.")
+                        break
+                    shutdown_attempts += 1
+                    if shutdown_attempts < 3:
+                        self.log_message(f"Failed to turn off chamber, attempt {shutdown_attempts}/3")
+                        time.sleep(2)
+                    else:
+                        self.log_message("Warning: Could not confirm chamber was turned off after 3 attempts.")
             
             # Reset UI state
             self.cycling_status_label.config(text="Stopped")
@@ -716,6 +882,13 @@ class TempCycleGUI:
         if self.is_connected and self.ics_4899a:
             try:
                 self.gpib_wrt("W 2000, 0")  # Turn chamber off
+            except:
+                pass
+        
+        # Close power supply connection
+        if self.power_supply:
+            try:
+                self.power_supply.close()
             except:
                 pass
                 
