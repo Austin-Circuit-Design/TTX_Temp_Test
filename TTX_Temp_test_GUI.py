@@ -4,6 +4,8 @@ import threading
 import pyvisa
 import time
 from datetime import datetime
+import csv
+import os
 
 class TempCycleGUI:
     def __init__(self, root):
@@ -46,7 +48,16 @@ class TempCycleGUI:
         self.power_supply_resource = "USB0::0xF4EC::0xF4EC::SPD13DCD6R1562::INSTR"
         self.power_cycles_performed = 0
         
+        # CSV logging
+        self.csv_file = None
+        self.csv_writer = None
+        self.csv_filename = None
+        self.logging_enabled = True
+
+        
+        
         self.setup_gui()
+        self.setup_csv_logging()
         self.connect_to_device()
         self.connect_to_power_supply()
 
@@ -185,6 +196,92 @@ class TempCycleGUI:
         self.log_text.insert(tk.END, full_message)
         self.log_text.see(tk.END)
         print(message)  # Also print to console
+
+    def setup_csv_logging(self):
+        """Setup CSV file for logging temperature data"""
+        try:
+            # Create logs directory if it doesn't exist
+            log_dir = os.path.join(os.path.dirname(__file__), "logs")
+            if not os.path.exists(log_dir):
+                os.makedirs(log_dir)
+            
+            # Create filename with timestamp
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            self.csv_filename = os.path.join(log_dir, f"temp_cycle_log_{timestamp}.csv")
+            
+            # Open CSV file and write header
+            self.csv_file = open(self.csv_filename, 'w', newline='')
+            self.csv_writer = csv.writer(self.csv_file)
+            self.csv_writer.writerow(['Timestamp', 'Temperature (°F)', 'Target Temperature (°F)', 
+                                     'Cycle Count', 'Phase', 'Event'])
+            self.csv_file.flush()
+            
+            self.log_message(f"CSV logging initialized: {self.csv_filename}")
+            
+        except Exception as e:
+            self.log_message(f"Failed to setup CSV logging: {e}")
+            self.logging_enabled = False
+
+    def log_temperature_to_csv(self, temperature):
+        """Log temperature reading to CSV file"""
+        if not self.logging_enabled or not self.csv_writer:
+            return
+        
+        try:
+            timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            target_temp = self.target_temp_label.cget("text").replace("°F", "").strip()
+            if target_temp == "--":
+                target_temp = ""
+            
+            phase = self.current_phase_label.cget("text")
+            if phase == "--":
+                phase = "Idle"
+            
+            self.csv_writer.writerow([
+                timestamp,
+                f"{temperature:.2f}",
+                target_temp,
+                self.cycle_count,
+                phase,
+                ""
+            ])
+            self.csv_file.flush()
+            
+        except Exception as e:
+            self.log_message(f"CSV logging error: {e}")
+
+    def log_event_to_csv(self, event_description):
+        """Log a specific event to CSV file"""
+        if not self.logging_enabled or not self.csv_writer:
+            return
+        
+        try:
+            timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            target_temp = self.target_temp_label.cget("text").replace("°F", "").strip()
+            if target_temp == "--":
+                target_temp = ""
+            
+            # Get current temperature if available
+            current_temp_text = self.current_temp_label.cget("text").replace("°F", "").strip()
+            if current_temp_text == "--":
+                current_temp_text = ""
+            
+            phase = self.current_phase_label.cget("text")
+            if phase == "--":
+                phase = "Idle"
+            
+            self.csv_writer.writerow([
+                timestamp,
+                current_temp_text,
+                target_temp,
+                self.cycle_count,
+                phase,
+                event_description
+            ])
+            self.csv_file.flush()
+            
+        except Exception as e:
+            self.log_message(f"CSV event logging error: {e}")
         
     def update_timeout(self):
         """Update GPIB timeout setting"""
@@ -538,6 +635,10 @@ class TempCycleGUI:
                 # Temperature read successful - reset failure counters
                 self.consecutive_comm_failures = 0
                 self.last_successful_temp_read = time.time()
+                
+                # Log temperature to CSV
+                self.log_temperature_to_csv(temp_value)
+                
                 return temp_value
                 
             except (ValueError, TypeError) as e:
@@ -739,6 +840,9 @@ class TempCycleGUI:
             
             self.log_message(f"Completed {self.current_transition_type} in {elapsed_minutes:.1f} minutes "
                            f"(from {self.transition_start_temp:.1f}°F to {final_temp:.1f}°F)")
+            
+            # Log to CSV
+            self.log_event_to_csv(f"Completed {self.current_transition_type}: {self.transition_start_temp:.1f}°F -> {final_temp:.1f}°F in {elapsed_minutes:.1f} min")
             
             # Reset transition tracking
             self.transition_start_time = None
