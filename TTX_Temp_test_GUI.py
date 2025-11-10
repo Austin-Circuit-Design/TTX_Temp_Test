@@ -14,6 +14,14 @@ class TempCycleGUI:
         self.root.geometry("600x600")
         
         # Initialize variables
+        # Deferred update state
+        self.editing_temps = False
+        self.pending_update = False
+        self.pending_low_temp = None
+        self.pending_high_temp = None
+        self.current_low_temp = None
+        self.current_high_temp = None
+
         self.cycling_thread = None
         self.stop_cycling = False
         self.rm = None
@@ -53,8 +61,6 @@ class TempCycleGUI:
         self.csv_writer = None
         self.csv_filename = None
         self.logging_enabled = True
-
-        
         
         self.setup_gui()
         self.setup_csv_logging()
@@ -82,15 +88,30 @@ class TempCycleGUI:
         
         ttk.Label(temp_frame, text="Low Temperature (°F):").grid(row=0, column=0, sticky=tk.W)
         self.low_temp_var = tk.StringVar(value="32")
-        ttk.Entry(temp_frame, textvariable=self.low_temp_var, width=10).grid(row=0, column=1, padx=(5, 0))
+        self.low_entry = ttk.Entry(temp_frame, textvariable=self.low_temp_var, width=10)
+        self.low_entry.grid(row=0, column=1, padx=(5, 0))
         
         ttk.Label(temp_frame, text="High Temperature (°F):").grid(row=1, column=0, sticky=tk.W)
         self.high_temp_var = tk.StringVar(value="140")
-        ttk.Entry(temp_frame, textvariable=self.high_temp_var, width=10).grid(row=1, column=1, padx=(5, 0))
+        self.high_entry = ttk.Entry(temp_frame, textvariable=self.high_temp_var, width=10)
+        self.high_entry.grid(row=1, column=1, padx=(5, 0))
         
         ttk.Label(temp_frame, text="Hold Time (minutes):").grid(row=2, column=0, sticky=tk.W)
         self.hold_time_var = tk.StringVar(value="5")
-        ttk.Entry(temp_frame, textvariable=self.hold_time_var, width=10).grid(row=2, column=1, padx=(5, 0))
+        self.hold_entry = ttk.Entry(temp_frame, textvariable=self.hold_time_var, width=10)
+        self.hold_entry.grid(row=2, column=1, padx=(5, 0))
+
+        # Update controls for deferred temperature changes
+        self.update_btn = ttk.Button(temp_frame, text="Update…", command=self.begin_temp_update)
+        self.apply_btn = ttk.Button(temp_frame, text="Apply", command=self.apply_temp_update)
+        self.cancel_btn = ttk.Button(temp_frame, text="Cancel", command=self.cancel_temp_update)
+        temp_frame.grid_columnconfigure(2, minsize=120)
+        self.update_btn.grid(row=0, column=2, rowspan=3, padx=(10,0), sticky="n")
+        self.apply_btn.grid(row=0, column=2, rowspan=3, padx=(10,0), sticky="n")
+        self.cancel_btn.grid(row=0, column=2, rowspan=3, padx=(10,0), sticky="ne")
+        self.apply_btn.grid_remove()
+        self.cancel_btn.grid_remove()
+        self.update_btn.state(["disabled"])
         
         # Timeout settings frame
         timeout_frame = ttk.LabelFrame(main_frame, text="Communication Settings", padding="10")
@@ -973,8 +994,8 @@ class TempCycleGUI:
 
     def cycling_worker(self):
         try:
-            low_temp = float(self.low_temp_var.get())
-            high_temp = float(self.high_temp_var.get())
+            low_temp = self.current_low_temp if self.current_low_temp is not None else float(self.low_temp_var.get())
+            high_temp = self.current_high_temp if self.current_high_temp is not None else float(self.high_temp_var.get())
             
             self.log_message(f"Starting temperature cycling between {low_temp}°F and {high_temp}°F")
             
@@ -1041,10 +1062,30 @@ class TempCycleGUI:
                         # Increment cycle counter after completing high temperature (end of full cycle)
                         if i == 1:  # High temperature is second in the cycle
                             self.increment_cycle_counter()
+                            # Apply any pending temp updates at the cycle boundary
+                            if self.pending_update:
+                                low_temp = self.pending_low_temp
+                                high_temp = self.pending_high_temp
+                                self.current_low_temp = low_temp
+                                self.current_high_temp = high_temp
+                                self.pending_update = False
+                                # Reflect the new active temps in the UI
+                                try:
+                                    self.low_temp_var.set(str(low_temp))
+                                    self.high_temp_var.set(str(high_temp))
+                                except Exception:
+                                    pass
+                                self.log_message(f"Applied new temperatures for next cycle: Low={low_temp}°F, High={high_temp}°F")
                         
         except Exception as e:
             self.log_message(f"An error occurred: {e}")
         finally:
+            # Reset UI state after worker exits
+            try:
+                self.root.after(0, self._on_worker_exit_ui_reset)
+            except Exception:
+                pass
+
             # Enhanced chamber shutdown
             if self.is_connected:
                 shutdown_attempts = 0
@@ -1068,6 +1109,54 @@ class TempCycleGUI:
             self.start_button.config(state="normal")
             self.stop_button.config(state="disabled")
             self.stop_cycling = False
+    # ===== Deferred Temperature Update Helpers =====
+    def _set_temp_fields_state(self, editable: bool):
+        state = "normal" if editable else "disabled"
+        try:
+            self.low_entry.config(state=state)
+            self.high_entry.config(state=state)
+        except Exception:
+            pass  # entries may not yet exist in edge cases
+
+    def begin_temp_update(self):
+        if getattr(self, 'cycling_thread', None) is None:
+            return
+        self._set_temp_fields_state(True)
+        self.update_btn.grid_remove()
+        self.apply_btn.grid()
+        self.cancel_btn.grid()
+
+    def apply_temp_update(self):
+        try:
+            low = float(self.low_temp_var.get())
+            high = float(self.high_temp_var.get())
+        except ValueError:
+            self.log_message("Invalid temperature values; enter numbers.")
+            return
+        if low >= high:
+            self.log_message("Low must be less than High.")
+            return
+        self.pending_low_temp = low
+        self.pending_high_temp = high
+        self.pending_update = True
+        self.log_message(f"New temperatures staged: Low={low}°F, High={high}°F (will apply after current cycle finishes)")
+        self._set_temp_fields_state(False)
+        self.apply_btn.grid_remove()
+        self.cancel_btn.grid_remove()
+        self.update_btn.grid()
+
+    def cancel_temp_update(self):
+        # Reset UI to current active temps
+        if self.current_low_temp is not None:
+            self.low_temp_var.set(str(self.current_low_temp))
+        if self.current_high_temp is not None:
+            self.high_temp_var.set(str(self.current_high_temp))
+        self._set_temp_fields_state(False)
+        self.apply_btn.grid_remove()
+        self.cancel_btn.grid_remove()
+        self.update_btn.grid()
+        self.log_message("Temperature update canceled.")
+
 
     def start_cycling(self):
         if not self.is_connected:
@@ -1080,6 +1169,18 @@ class TempCycleGUI:
         self.cycling_status_label.config(text="Running")
         self.start_button.config(state="disabled")
         self.stop_button.config(state="normal")
+        # Capture authoritative temps and lock fields; enable Update
+        try:
+            self.current_low_temp = float(self.low_temp_var.get())
+            self.current_high_temp = float(self.high_temp_var.get())
+        except ValueError:
+            self.log_message("Invalid starting temperatures.")
+            return
+        self._set_temp_fields_state(False)
+        self.update_btn.state(["!disabled"])
+        self.apply_btn.grid_remove()
+        self.cancel_btn.grid_remove()
+        self.update_btn.grid()
         
         # Start cycling in a separate thread
         self.cycling_thread = threading.Thread(target=self.cycling_worker, daemon=True)
@@ -1089,6 +1190,18 @@ class TempCycleGUI:
         self.stop_cycling = True
         self.log_message("Stop signal sent. Waiting for current operation to complete...")
         self.cycling_status_label.config(text="Stopping...")
+    def _on_worker_exit_ui_reset(self):
+        try:
+            self.start_button.config(state="normal")
+            self.stop_button.config(state="disabled")
+            self._set_temp_fields_state(True)
+            self.update_btn.state(["disabled"])
+            self.apply_btn.grid_remove()
+            self.cancel_btn.grid_remove()
+            self.update_btn.grid()
+        except Exception:
+            pass
+
         
     def on_closing(self):
         self.stop_cycling = True
