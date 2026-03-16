@@ -53,7 +53,7 @@ class TempCycleGUI:
         
         # Power supply control for recovery
         self.power_supply = None
-        self.power_supply_resource = "USB0::0xF4EC::0xF4EC::SPD13DCD6R1562::INSTR"
+        self.power_supply_resource = "USB0::0xF4EC::0x1410::SPD13DCC7R0188::INSTR"
         self.power_cycles_performed = 0
         
         # CSV logging
@@ -499,7 +499,7 @@ class TempCycleGUI:
             self.is_connected = False
             return False
         return True
-
+        '''  
     def force_hardware_reset(self):
         """Force a complete hardware reset of GPIB connection with power cycling"""
         self.log_message("Performing forced hardware reset...")
@@ -533,7 +533,7 @@ class TempCycleGUI:
         except Exception as e:
             self.log_message(f"Hardware reset failed: {e}")
             return False
-
+        '''  
     def gpib_rd_with_retry(self, cmd, retries=None, extended_timeout=False):
         """GPIB read with retry logic"""
         if retries is None:
@@ -911,11 +911,11 @@ class TempCycleGUI:
                 self.connect_to_power_supply()
             else:
                 self.log_message("Power cycle failed - proceeding with software reset")
-                
+            ''' 
             # Perform hardware reset regardless
             if not self.force_hardware_reset():
                 return False
-        
+                '''  
         try:
             # Close existing connections
             if self.ics_4899a:
